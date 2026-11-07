@@ -217,6 +217,72 @@ def _coverage_change(previous, current):
     return {'status': '覆盖未变化', 'reason': '目录、来源映射和必要阶段状态一致'}
 
 
+def _group_deltas(previous_rows, current_rows, key, limit):
+    def index(rows):
+        result = {}
+        for row in rows if isinstance(rows, list) else []:
+            if not isinstance(row, dict):
+                continue
+            label = str(row.get(key) or row.get('label') or row.get('path') or '').strip()
+            value = row.get('logical_bytes')
+            if label and isinstance(value, int) and not isinstance(value, bool):
+                result[label] = value
+        return result
+
+    old, current = index(previous_rows), index(current_rows)
+    changes = [
+        {'label': label, 'delta_bytes': current.get(label, 0) - old.get(label, 0)}
+        for label in old.keys() | current.keys()
+    ]
+    return sorted(changes, key=lambda row: abs(row['delta_bytes']), reverse=True)[:limit]
+
+
+def _baseline_comparison(previous, home):
+    if not (_valid_summary(previous) and previous.get('status') == 'completed'
+            and previous.get('home') == str(home)):
+        return {
+            'previous_checked_at': None,
+            'previous_codex_bytes': None,
+            'previous_free_bytes': None,
+            'previous_coverage_complete': None,
+            'delta_comparable': False,
+            'free_delta_comparable': False,
+            'codex_bytes_delta': None,
+            'free_bytes_delta': None,
+            'coverage_change': '无可用的上一份成功摘要',
+        }
+    usage = previous.get('usage_summary') or {}
+    coverage = previous.get('coverage') or {}
+    return {
+        'previous_checked_at': previous.get('checked_at'),
+        'previous_codex_bytes': usage.get('codex_logical_bytes'),
+        'previous_free_bytes': previous.get('free_bytes'),
+        'previous_coverage_complete': coverage.get('coverage_complete'),
+        'delta_comparable': False,
+        'free_delta_comparable': False,
+        'codex_bytes_delta': None,
+        'free_bytes_delta': None,
+        'coverage_change': '等待本轮完整扫描后比较',
+    }
+
+
+def _status_report(status, reason, home, *, checked_at=None):
+    record = {
+        'status': status,
+        'reason': reason,
+        'checked_at': checked_at or datetime.datetime.now(
+            datetime.timezone(datetime.timedelta(hours=8))
+        ).isoformat(),
+        'home': str(Path(home).absolute()),
+        'inspection_only': True,
+        'trash_paths': [],
+        'coverage': {},
+        'comparison': _baseline_comparison(None, Path(home).absolute()),
+    }
+    record['chat_report'] = render_chat_report(record)
+    return record
+
+
 
 def _recover_partial_measurement(pending, home, health, error):
     """Preserve measured capacity when the final report stage times out.
@@ -279,7 +345,19 @@ def _recover_partial_measurement(pending, home, health, error):
         'free_bytes': health['free_bytes'],
         'scan_total_elapsed_seconds': data.get('scan_elapsed_seconds'),
         'checked_at': health.get('checked_at'),
-        'comparison': {'coverage_change': '本轮未完成，暂不比较'},
+        'status': health.get('status', 'failed'),
+        'home': str(home),
+        'reason': str(error),
+        'comparison': {
+            **(health.get('comparison') or {}),
+            'current_codex_bytes': (health.get('usage_summary') or {}).get('codex_logical_bytes'),
+            'current_free_bytes': health.get('free_bytes'),
+            'delta_comparable': False,
+            'free_delta_comparable': False,
+            'codex_bytes_delta': None,
+            'free_bytes_delta': None,
+            'coverage_change': '本轮未完成，暂不比较',
+        },
     })
     health['chat_report'] = render_chat_report(report_payload)
     output_dir = pending / 'outputs'
@@ -311,18 +389,17 @@ def run_check(home, workspace, budget=1200):
     account = pwd.getpwuid(os.getuid())
     system_home = Path(account.pw_dir).absolute()
     if account.pw_name != 'mac' or system_home != Path('/Users/mac') or Path(home).absolute() != system_home:
-        return {
-            'status': 'failed',
-            'reason': f'系统账号核验不匹配；仅允许 mac:/Users/mac，实际为 {account.pw_name}:{system_home}',
-            'inspection_only': True,
-            'trash_paths': [],
-        }
+        return _status_report(
+            'failed',
+            f'系统账号核验不匹配；仅允许 mac:/Users/mac，实际为 {account.pw_name}:{system_home}',
+            home,
+        )
     workspace.mkdir(parents=True, exist_ok=True)
     with (workspace / 'health-run.lock').open('a') as lease:
         try:
             fcntl.flock(lease, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except BlockingIOError:
-            return {'status': 'skipped', 'reason': '同工作目录已有检查正在运行', 'inspection_only': True, 'trash_paths': []}
+            return _status_report('skipped', '同工作目录已有检查正在运行', home)
         return _run_check(home, workspace, budget, started=started)
 
 
@@ -378,6 +455,7 @@ def _run_check(home, workspace, budget=1200, *, started=None):
         health['history_invalid_record_count'] = len(history_item_errors)
     valid_previous_success = (_valid_summary(previous) and previous.get('status') == 'completed' and
                               (previous.get('home') is None or previous.get('home') == str(home)))
+    health['comparison'] = _baseline_comparison(previous if valid_previous_success else None, home)
     try:
         remaining = scan_budget.remaining()
         if remaining is None or remaining <= 0:
@@ -424,15 +502,24 @@ def _run_check(home, workspace, budget=1200, *, started=None):
         health['coverage']['comparison_signature'] = _comparison_signature(
             health['coverage'], directory_meta)
         health['coverage_change'] = _coverage_change(previous, health)
-        if isinstance(previous, dict) and previous.get('status') == 'completed' and previous.get('home') == str(home):
-            before = previous.get('totals', {}).get('scanned_allocated_bytes')
-            now = health['totals'].get('scanned_allocated_bytes')
-            comparable = (previous.get('coverage', {}).get('stages', {}).get('traversal') == 'complete' and
-                          health['coverage']['stages'].get('traversal') == 'complete' and
-                          health['coverage_change'].get('status') == '覆盖未变化' and
-                          health['directory_summary_meta'].get('status') == '已记录')
-            health['allocated_delta_bytes'] = now - before if comparable and now is not None and before is not None else None
-            health['delta_comparable'] = comparable
+        comparable = (
+            valid_previous_success
+            and previous.get('coverage', {}).get('stages', {}).get('traversal') == 'complete'
+            and health['coverage']['stages'].get('traversal') == 'complete'
+            and health['coverage_change'].get('status') == '覆盖未变化'
+            and health['directory_summary_meta'].get('status') == '已记录'
+        )
+        before_allocated = (
+            (previous.get('totals') or {}).get('scanned_allocated_bytes')
+            if valid_previous_success else None
+        )
+        now_allocated = health['totals'].get('scanned_allocated_bytes')
+        health['allocated_delta_bytes'] = (
+            now_allocated - before_allocated
+            if comparable and now_allocated is not None and before_allocated is not None
+            else None
+        )
+        health['delta_comparable'] = bool(comparable)
         stages = health['coverage'].get('stages', {})
         capacity_complete = (stages.get('traversal') == 'complete' and
                              health['coverage'].get('scope_complete') is True and
@@ -451,17 +538,49 @@ def _run_check(home, workspace, budget=1200, *, started=None):
         current_usage = health.get('usage_summary') or {}
         current_codex = current_usage.get('codex_logical_bytes')
         previous_codex = previous_usage.get('codex_logical_bytes')
+        previous_free = (previous or {}).get('free_bytes')
+        free_comparable = (
+            bool(comparable)
+            and isinstance(previous_free, int)
+            and isinstance(health['free_bytes'], int)
+        )
         health['comparison'] = {
-            'codex_bytes_delta': (current_codex - previous_codex
-                                  if isinstance(current_codex, int) and isinstance(previous_codex, int)
-                                  else None),
+            'previous_checked_at': previous.get('checked_at') if valid_previous_success else None,
+            'previous_codex_bytes': previous_codex if isinstance(previous_codex, int) else None,
+            'current_codex_bytes': current_codex if isinstance(current_codex, int) else None,
+            'codex_bytes_delta': (
+                current_codex - previous_codex
+                if comparable and isinstance(current_codex, int) and isinstance(previous_codex, int)
+                else None
+            ),
+            'previous_free_bytes': previous_free if isinstance(previous_free, int) else None,
+            'current_free_bytes': health['free_bytes'],
+            'free_bytes_delta': health['free_bytes'] - previous_free if free_comparable else None,
+            'delta_comparable': bool(
+                comparable and isinstance(current_codex, int) and isinstance(previous_codex, int)
+            ),
+            'free_delta_comparable': free_comparable,
+            'previous_coverage_complete': (
+                (previous.get('coverage') or {}).get('coverage_complete')
+                if valid_previous_success else None
+            ),
             'coverage_change': health['coverage_change'].get('status'),
+            'location_deltas': (
+                _group_deltas(previous_usage.get('locations'), current_usage.get('locations'), 'label', 12)
+                if comparable else []
+            ),
+            'project_deltas': (
+                _group_deltas(previous_usage.get('projects'), current_usage.get('projects'), 'project_key', 20)
+                if comparable else []
+            ),
         }
         report_payload = dict(data)
         report_payload.update({
             'free_bytes': health['free_bytes'],
             'scan_total_elapsed_seconds': health['scan_total_elapsed_seconds'],
             'checked_at': health['checked_at'],
+            'status': health['status'],
+            'home': str(home),
             'comparison': health['comparison'],
         })
         health['chat_report'] = render_chat_report(report_payload)
@@ -475,6 +594,11 @@ def _run_check(home, workspace, budget=1200, *, started=None):
             pass
     except (OSError, ValueError, KeyError, TypeError, RuntimeError, subprocess.TimeoutExpired) as error:
         health.update(status='failed', reason=str(error), previous_success_preserved=valid_previous_success)
+        if health.get('free_bytes') is None:
+            try:
+                health['free_bytes'] = shutil.disk_usage(home).free
+            except OSError:
+                health['free_bytes'] = None
         _recover_partial_measurement(pending, home, health, error)
         try:
             _atomic_write_json(checkpoint, {
@@ -487,6 +611,8 @@ def _run_check(home, workspace, budget=1200, *, started=None):
     health['elapsed_seconds'] = round(time.monotonic() - started, 3)
     if health['status'] == 'failed':
         health.setdefault('previous_success_preserved', valid_previous_success)
+    if not isinstance(health.get('chat_report'), str):
+        health['chat_report'] = render_chat_report(health)
     # Keep the compact coverage summary for trend/RCA review. The coverage
     # value was already stripped of path/event lists above, so this does not
     # turn the history file into an inventory; it preserves stage state,
@@ -525,9 +651,21 @@ def main():
         parser.error('检查预算必须大于零')
     account = pwd.getpwuid(os.getuid())
     if account.pw_name != 'mac' or Path(account.pw_dir).absolute() != Path('/Users/mac'):
-        parser.error('此清理技能仅允许在系统账号 mac、home /Users/mac 下运行')
+        result = _status_report(
+            'failed',
+            f'系统账号不匹配；仅允许 mac:/Users/mac，实际为 {account.pw_name}:{Path(account.pw_dir).absolute()}',
+            args.home.expanduser().absolute(),
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 1
     if args.home.expanduser().absolute() != Path(account.pw_dir).absolute():
-        parser.error('--home 必须与系统账号资料确认的 /Users/mac 一致')
+        result = _status_report(
+            'failed',
+            f'--home 与系统账号资料不匹配；要求 {Path(account.pw_dir).absolute()}，实际为 {args.home.expanduser().absolute()}',
+            args.home.expanduser().absolute(),
+        )
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+        return 1
     if str(args.workspace).startswith('/Volumes/T1/'):
         volume = Path('/Volumes/T1')
         if not volume.is_mount() or not volume.is_dir() or not os.access(volume, os.W_OK):

@@ -78,6 +78,56 @@ def estimate_capacity(
     buckets = {action: 0 for action, _ in rows}
     counts = {action: 0 for action, _ in rows}
     missing_paths: set[str] = set()
+    candidate_groups: dict[tuple[str, str], dict[str, Any]] = {}
+
+    def add_candidate_entity(
+        row_index: int,
+        entity_path: str,
+        entity: dict[str, Any],
+    ) -> None:
+        action, row = rows[row_index]
+        path = (
+            str(_path(entity_path))
+            if action == "backup-then-delete"
+            else str(_path(row.get("path") or entity_path))
+        )
+        key = (action, path)
+        entry = candidate_groups.setdefault(key, {
+            "action": action,
+            "path": path,
+            "source_path": str(row.get("path") or path),
+            "logical_bytes": 0,
+            "allocated_bytes": 0,
+            "allocated_bytes_complete": True,
+            "entity_count": 0,
+            "artifact_type": row.get("artifact_type"),
+            "reason": row.get("reason"),
+            "recommendation": row.get("recommendation"),
+            "provenance": row.get("provenance"),
+            "evidence_paths": row.get("evidence_paths"),
+            "rebuild_basis": row.get("rebuild_basis"),
+            "regeneration_evidence": row.get("regeneration_evidence"),
+            "retained_path": row.get("retained_path"),
+            "rebuild_command": row.get("rebuild_command"),
+            "active": row.get("active"),
+            "activity": row.get("activity"),
+            "git_state": row.get("git_state"),
+            "retention_evidence": row.get("retention_evidence"),
+            "backup_category": row.get("backup_category"),
+            "retention_days": row.get("retention_days"),
+            "migration_reason": row.get("migration_reason"),
+            "idle_for_hours": row.get("idle_for_hours"),
+            "group_status": row.get("group_status"),
+            "migration_blockers": row.get("migration_blockers"),
+        })
+        amount = int(entity.get("bytes") or 0)
+        entry["logical_bytes"] += amount
+        entry["entity_count"] += 1
+        allocated = entity.get("allocated_bytes")
+        if isinstance(allocated, int) and not isinstance(allocated, bool):
+            entry["allocated_bytes"] += allocated
+        else:
+            entry["allocated_bytes_complete"] = False
 
     if measured_inventory:
         target_rows: dict[str, list[int]] = {}
@@ -140,10 +190,11 @@ def estimate_capacity(
             if amount > 0:
                 buckets[action] += amount
                 counts[action] += 1
+                add_candidate_entity(row_index, _path_text, entity)
     else:
         assigned: set[str] = set()
-        for index, (action, row) in enumerate(rows):
-            if index % 128 == 0:
+        for row_index, (action, row) in enumerate(rows):
+            if row_index % 128 == 0:
                 scan_budget.check("清理计划容量分摊")
             if file_entities is not None:
                 entities = _path_entities(row, file_entities)
@@ -170,8 +221,27 @@ def estimate_capacity(
                 if amount > 0:
                     buckets[action] += amount
                     counts[action] += 1
+                    add_candidate_entity(row_index, str(entity.get("path") or row.get("path") or ""), {
+                        **entity, "bytes": amount,
+                    })
 
     total = sum(buckets.values())
+    candidate_entries = sorted(
+        (
+            {
+                **entry,
+                "allocated_bytes": (
+                    entry["allocated_bytes"]
+                    if entry["allocated_bytes_complete"] else None
+                ),
+            }
+            for entry in candidate_groups.values()
+        ),
+        key=lambda entry: (
+            priorities.get(entry["action"], 9),
+            entry["path"],
+        ),
+    )
     return {
         "basis": (
             "复用本次扫描文件清单；同一 device/inode 只计一次；父工作树和内部候选按执行顺序分摊"
@@ -179,6 +249,12 @@ def estimate_capacity(
             "测试/兼容调用按精确路径展开文件实体；同一 device/inode 只计一次"
         ),
         "inventory_reused": measured_inventory,
+        "candidate_entries": candidate_entries,
+        "candidate_entries_complete": not missing_paths,
+        "candidate_entry_counts": {
+            action: sum(1 for entry in candidate_entries if entry["action"] == action)
+            for action in priorities
+        },
         "unmeasured_paths": sorted(path for path in missing_paths if path),
         "estimated_reclaimable_bytes": total,
         "estimated_reclaimable_size": human_bytes(total),
@@ -224,7 +300,7 @@ def build_plan(
                     "workspace_root", "source_entries", "source_revision", "rebuild_command",
                     "rebuild_basis", "completed_outputs", "regeneration_evidence", "project_key",
                     "evidence_paths", "retention", "activity", "active", "git_state",
-                    "git_status_digest",
+                    "git_status_digest", "reason", "recommendation", "provenance",
                 )
             })
             seen_direct.add(path)
@@ -258,6 +334,11 @@ def build_plan(
                 "backup_category": item.get("backup_category") or "codex-archives",
                 "retention_evidence": item.get("retention_evidence", {}),
                 "review_priority": item.get("review_priority", ""),
+                "artifact_type": item.get("artifact_type"),
+                "reason": item.get("reason"),
+                "recommendation": item.get("recommendation"),
+                "provenance": item.get("provenance"),
+                "evidence_paths": item.get("evidence_paths"),
             })
         elif action == "migrate-to-t1" and path:
             worktrees.append({

@@ -3466,15 +3466,29 @@ def build_data(
             **(coverage.get("phase_timings") or {}),
             "cleanup-plan": round(time.monotonic() - plan_started, 3),
         }
-        coverage["cleanup_plan_complete"] = not plan_summary["unmeasured_paths"]
+        inventory_complete = (
+            coverage.get("scope_complete") is True
+            and coverage.get("coverage_complete") is True
+            and coverage.get("budget_exhausted") is not True
+        )
+        coverage["cleanup_plan_complete"] = (
+            inventory_complete and not plan_summary["unmeasured_paths"]
+        )
         coverage["cleanup_plan_unmeasured_paths"] = plan_summary["unmeasured_paths"]
         if not coverage["cleanup_plan_complete"]:
             coverage["coverage_complete"] = False
             coverage.setdefault("diagnostics", []).append({
                 "phase": "cleanup-plan",
-                "code": "unmeasured-action-path",
+                "code": (
+                    "incomplete-inventory" if not inventory_complete
+                    else "unmeasured-action-path"
+                ),
                 "severity": "error",
-                "reason": "清理候选路径未能在本次文件清单中完整测量",
+                "reason": (
+                    "扫描范围或文件清单未通过完整验收；本轮候选数量和建议释放量不能作为零或完整结果"
+                    if not inventory_complete
+                    else "清理候选路径未能在本次文件清单中完整测量"
+                ),
                 "paths": plan_summary["unmeasured_paths"],
                 "trash_paths": [],
             })

@@ -156,7 +156,9 @@ never folded into the current machine's reclaimable total.
 
 对真实检查缺口继续做用途分析：复用项目、批次身份、计数、输入/结果和路径引用；对空文件、损坏记录和大文件读取有限头尾样本，对读取被打断的目录重试查看直属成员。报告用途、证据强度、保留/核实建议及尚缺信息。容量遍历先完整结束；用途分析按目标接续，默认总预算 120 秒、单目标 5 秒、最多 4 个并行目标，已完成结果和未检查项都保留。一个阻塞目标不能占满全部检查机会；不输出文件原文，不跟随链接或跨卷。用途查明不能增加删除权限。每日摘要及历史保留容量、分析结果、目录级精简统计和耗时，详细证据放在报告诊断区。覆盖变化单独标为“新增覆盖”或“覆盖变化”，不伪装成从零增长；旧摘要缺少目录字段时显示未记录。
 
-每日检查的产品自动化要在独立 Skill 覆盖安装并得到单独授权后才创建或更新。创建前先检查已有任务，避免重复；默认北京时间每天 09:00、只读检查。当前宿主若没有可用的产品自动化入口，只记录阻塞原因和解除条件，不能用 launchd、crontab 或内部配置文件冒充成功。
+首次手动调用本 Skill 时，先通过 Codex 产品自动化入口检查当前项目是否已有每日北京时间 09:00 的存储检查任务。若已有匹配任务就复用；只有提示内容过期时才更新该任务，并保留原有时间、项目、模型、推理强度、状态和本地运行设置。缺少任务时才创建，不得重复创建。创建和更新都必须使用 Codex 自动化管理入口，不能编辑 `automation.toml`、launchd 或 crontab 代替。
+
+每日自动化提示只负责调用本 Skill 的每日入口并展示返回的 `chat_report`；扫描范围、覆盖验收、报告格式和只读边界都以本 Skill 为准。每日运行失败或扫描不完整时，只报告失败/部分结果，不创建或更新自动化，也不把占位 0 当成无候选。当前宿主若没有可用的产品自动化入口，说明阻塞原因和解除条件。
 
 使用独立包入口：`python3 scripts/daily_codex_health.py --home "$HOME"`。每日只遍历当前执行账号内已确认的 Codex 根，排除整个 home、其他账号、iCloud 和外置卷；完整扫描预算为 1200 秒，并复用本轮文件清单。完整内容重复校验可另外使用 `scan_codex.py --scan-mode full --duplicate-hash`，不能把日报当成删除授权。
 
@@ -237,26 +239,19 @@ Always report the findings, evidence and verification directly in the current Co
 
 日常检查与手动报告均遵循 SOP §11.1：容量、增减量、耗时及百分比保留两位小数，每个测量数字后直接带单位（如 `67.34 GB`、`减少 20.26 GB`、`331.11 秒`）；不能只在表头声明单位。时间单独标为 `11:18`，与容量分列。聊天用 🔴 标出新增占用或可用空间下降，🟢 标出占用减少或可用空间增加；支持颜色的报告用红/绿表达同样的含义，并保留文字说明。
 
-先给空间前后对比表，再按项目和用途列增长组成，最后列「建议安全清理／先备份再删／保留／暂不处理」及依据。名称必须解释对象是什么、为什么产生；路径放在有含义的超链接中，不以长路径代替用途。增长组成不足以对账时，单列尚未定位的量、不可比较的覆盖和下一步检查，不能将逻辑量或分配量当作实际释放量。明显增长独立触发提醒，不必等到低空间警戒线；具体口径、证据和授权要求见 SOP §11.1。
+每份日报和手动检查报告固定输出三张表：①空间变化；②增长来源与已知占用；③清理建议。第三张表逐项列出每个有单项证据支持的候选，包含精确路径、单项占用、建议类别和判断依据；不得把多个路径合并成“其他”。表内按「建议安全清理」「先备份再删」「暂不处理 / 搬移」分别计算小计，并给出候选总量；「保留」内容可以作为非候选明细列出，但不计入候选总量。按文件身份去重，父目录与子项不得重复计算。
 
-Use these categories and wording (replace placeholders with measured values):
+只有扫描完整并通过验收，且逐项清单确认没有候选时，才能写候选总量 `0`。扫描未完成时，将有证据的条目标为“部分清单”，列出已确认小计，并把整体候选总量写为“未知”；没有逐项候选证据时也写“未知”，不得把占位 `0` 解释成无候选。未通过完整验收的扫描不沿用旧扫描候选。候选占用是对象的逻辑大小，不承诺实际释放同额空间。
 
-| 类别 | 可清理多少 | 默认建议 |
-|---|---|---|
-| 应用缓存、临时文件 | 约 C GB；下载缓存另计 | 一般保留，收益小；Cargo/包缓存不主动删 |
-| 旧构建：每项目留最新一份 | 约 A GB | 推荐这个方案 |
-| 构建：一份也不留 | 约 B GB，比上一方案多 D GB | 源码和下载依赖保留，下次使用需要重新构建 |
-| 会话记录与生成图片 | 分别显示占用；不是可清理量 | 用户数据默认保留；真正的临时缓存单独核实 |
+名称必须解释对象是什么、为什么产生；路径使用有含义的链接标签。增长组成不足以对账时，单列尚未定位的量、不可比较的覆盖和下一步检查，不能将逻辑量或分配量当作实际释放量。明显增长独立触发提醒，不必等到低空间警戒线；具体口径、证据和授权要求见 SOP §11.1。
 
-The two build rows are alternative plans: B already includes A; never add them together. B covers only source-verified complete generated directories, including the latest retained directories and sole builds. Exclude known in-use paths from immediately reclaimable bytes and disclose any unknown usage state as an estimate pending execution checks. Computing B does not extend the default deletion allowlist or authorize deleting keepers. Label the scan time when reusing an earlier result. Do not invent byte counts for unmeasured download caches or image/session caches.
-
-After the table say “建议先清旧构建、每项目留最新一份，约 A GB；缓存、会话和图片保留。” A request for “全部构建都删” selects the second build plan; it does not mean deleting all Codex data. A question about how much that plan saves is not deletion authorization. Keep the exact underlying path ledger for execution and revalidate it when authorized.
+Report only measured amounts. If an optional “all builds removed” scenario is shown, label it as an alternative estimate outside the confirmed-candidate total; it must not broaden the default action scope or imply that keepers are approved for removal. Exclude known in-use paths from immediately reclaimable bytes and mark unknown usage as unknown. Label the scan time when reusing an earlier result. Do not invent byte counts for unmeasured download caches, sessions, or images.
 
 Treat colloquial “会话/绘画缓存” carefully: distinguish chat history, generated image originals, and confirmed regenerable intermediates. Never call chat history or unique generated images disposable cache. Never substitute small caches for completing the large-build assessment.
 
 The standalone report keeps the established Lieflat Charts Wire black/gray base, green/orange change semantics, 2×2 chart arrangement, and cleanup-specific dimensions such as user, platform, artifact type, risk, provenance, recoverability, and exact path. Its CSS is bundled in `scripts/report_theme.py`; generating an HTML report does not read a parent Skill at runtime.
 
-Keep the candidate ledger readable with progressive disclosure: show items of 100 MB or more individually, collect smaller items under “其他”, and reveal the next level at 10 MB or more when that group is opened. Continue dividing the remaining group by ten (1 MB, 100 KB, 10 KB, and so on) until the concrete items are visible. If the 100 MB rule would leave fewer than five individual items while the category has more than five items, show the five largest items individually and collect only the sixth and later items under “其他”. If a category has five or fewer items in total, show all of them without an “其他” group. The group summary must show its total size and item count; expanding a group must never widen the cleanup scope.
+The chat report lists every confirmed candidate path as its own row; it never hides small candidates in an “other” group. A standalone HTML ledger may use progressive disclosure, but every exact path, per-item size, category, and evidence record must remain available when expanded. Expanding a group must never widen the cleanup scope.
 
 ## Completion report
 

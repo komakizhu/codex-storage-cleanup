@@ -106,6 +106,37 @@ class DefaultCleanupPolicyTests(TestCase):
         )
         self.assertEqual(plan["unmeasured_paths"], ["/tmp/archive/missing.jsonl"])
 
+    def test_candidate_entries_deduplicate_parent_child_and_hardlinked_files(self):
+        plan = cleanup_plan.estimate_capacity(
+            [
+                {"path": "/tmp/project/output", "reason": "Confirmed generated output"},
+                {"path": "/tmp/project/output/cache", "reason": "Regenerable cache"},
+            ],
+            [],
+            [],
+            inventory=[
+                {"path": "/tmp/project/output", "identity": "dir:1", "bytes": 0,
+                 "allocated_bytes": 4096, "directory": True},
+                {"path": "/tmp/project/output/cache", "identity": "dir:2", "bytes": 0,
+                 "allocated_bytes": 4096, "directory": True},
+                {"path": "/tmp/project/output/cache/index", "identity": "1:10", "bytes": 20,
+                 "allocated_bytes": 4096},
+                {"path": "/tmp/project/output/cache/index-hardlink", "identity": "1:10", "bytes": 20,
+                 "allocated_bytes": 4096},
+                {"path": "/tmp/project/output/package", "identity": "1:11", "bytes": 30,
+                 "allocated_bytes": 4096},
+            ],
+            known_directories=["/tmp/project/output", "/tmp/project/output/cache"],
+            human_bytes=scan_codex.human_bytes,
+        )
+        entries = {row["path"]: row for row in plan["candidate_entries"]}
+        self.assertEqual(plan["estimated_reclaimable_bytes"], 50)
+        self.assertEqual(entries["/tmp/project/output/cache"]["logical_bytes"], 20)
+        self.assertEqual(entries["/tmp/project/output"]["logical_bytes"], 30)
+        self.assertEqual(entries["/tmp/project/output/cache"]["entity_count"], 1)
+        self.assertEqual(plan["candidate_entry_counts"]["direct-delete"], 2)
+        self.assertTrue(plan["candidate_entries_complete"])
+
     def test_execution_preflight_rechecks_new_session_activity(self):
         with TemporaryDirectory() as temp:
             home = Path(temp)

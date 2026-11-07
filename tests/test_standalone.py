@@ -44,7 +44,7 @@ class StandalonePackageTests(TestCase):
         metadata = (SKILL_ROOT / 'agents' / 'openai.yaml').read_text()
         self.assertIn('Codex 存储清理（Codex Storage Cleanup）', metadata)
         self.assertIn('查清 Codex 各处占用', metadata)
-        self.assertEqual((SKILL_ROOT / 'VERSION').read_text().strip(), '2.1.4')
+        self.assertEqual((SKILL_ROOT / 'VERSION').read_text().strip(), '2.2.0')
         skill = (SKILL_ROOT / 'SKILL.md').read_text()
         self.assertIn('中文：', skill)
         self.assertIn('English:', skill)
