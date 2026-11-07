@@ -36,4 +36,4 @@ python3 scripts/daily_codex_health.py --home "$HOME"
 
 Codex 存储清理的实际入口、脚本和元数据均在本独立目录中。旧路径 `storage-observatory/subskills/codex-storage-cleanup` 仅作为迁移兼容别名，供现有自动化继续读取；维护和手动调用时使用本目录。存储观察站仓库里的旧日报入口仅转发到本 Skill，不包含另一份扫描实现。
 
-版本：`2.2.0`
+版本：`2.2.1`
